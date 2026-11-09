@@ -242,66 +242,75 @@ async function processVideoMp4(item, settings) {
     canvas.height = h;
     const ctx = canvas.getContext("2d");
 
-    // Audio original → PCM (conserva el sonido sin importar su codec de entrada)
-    const AC0 = window.AudioContext || window.webkitAudioContext;
-    if (!AC0) throw new Error("sin Web Audio");
-    const ac = new AC0();
-    let audioBuffer = null;
+    // Audio original → PCM (opcional: si no hay audio o no se puede leer, sale MP4 solo-video)
+    let audioBuffer = null, sampleRate = 0, channels = 0;
     try {
-      if (ac.state === "suspended" && typeof ac.resume === "function") await ac.resume();
-      audioBuffer = await ac.decodeAudioData(await item.file.arrayBuffer());
-    } finally {
-      try { if (ac.close) await ac.close(); } catch (e) {}
-    }
-    if (!audioBuffer) throw new Error("no se pudo leer el audio");
-    const sampleRate = audioBuffer.sampleRate;
-    const channels = Math.min(2, audioBuffer.numberOfChannels || 2);
+      const AC0 = window.AudioContext || window.webkitAudioContext;
+      if (AC0) {
+        const ac = new AC0();
+        try {
+          if (ac.state === "suspended" && typeof ac.resume === "function") await ac.resume();
+          audioBuffer = await ac.decodeAudioData(await item.file.arrayBuffer());
+          sampleRate = audioBuffer.sampleRate;
+          channels = Math.min(2, audioBuffer.numberOfChannels || 2);
+        } finally {
+          try { if (ac.close) await ac.close(); } catch (e) {}
+        }
+      }
+    } catch (e) { audioBuffer = null; }
 
     const vSup = await VideoEncoder.isConfigSupported({
       codec: "avc1.640028", width: w, height: h, bitrate: 8000000, framerate: 30,
     }).catch(() => ({ supported: false }));
-    const aSup = await AudioEncoder.isConfigSupported({
-      codec: "mp4a.40.2", sampleRate, numberOfChannels: channels, bitrate: 128000,
-    }).catch(() => ({ supported: false }));
-    if (!vSup.supported || !aSup.supported) throw new Error("codificadores no soportados");
+    if (!vSup.supported) throw new Error("codificador H.264 no soportado");
+    let withAudio = false;
+    if (audioBuffer) {
+      const aSup = await AudioEncoder.isConfigSupported({
+        codec: "mp4a.40.2", sampleRate, numberOfChannels: channels, bitrate: 128000,
+      }).catch(() => ({ supported: false }));
+      withAudio = !!aSup.supported;
+    }
 
     const muxer = new Muxer({
       target: new ArrayBufferTarget(),
       fastStart: "in-memory",
       firstTimestampBehavior: "offset",
       video: { codec: "avc", width: w, height: h },
-      audio: { codec: "aac", sampleRate, numberOfChannels: channels },
+      ...(withAudio ? { audio: { codec: "aac", sampleRate, numberOfChannels: channels } } : {}),
     });
     const vEnc = new VideoEncoder({
       output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
       error: (e) => { throw e; },
     });
     vEnc.configure({ codec: "avc1.640028", width: w, height: h, bitrate: 8000000, framerate: 30 });
-    const aEnc = new AudioEncoder({
-      output: (chunk, meta) => muxer.addAudioChunk(chunk, meta),
-      error: (e) => { throw e; },
-    });
-    aEnc.configure({ codec: "mp4a.40.2", sampleRate, numberOfChannels: channels, bitrate: 128000 });
-
-    // Audio: PCM → AAC (trozos de 1024 muestras, f32 planar)
-    const FR = 1024;
-    const total = audioBuffer.length;
-    const chData = [];
-    for (let c = 0; c < channels; c++) chData.push(audioBuffer.getChannelData(c));
-    for (let off = 0, ts = 0; off < total; off += FR) {
-      const n = Math.min(FR, total - off);
-      const buf = new ArrayBuffer(n * channels * 4);
-      const f32 = new Float32Array(buf);
-      for (let c = 0; c < channels; c++) f32.set(chData[c].subarray(off, off + n), c * n);
-      const ad = new AudioData({
-        format: "f32-planar", sampleRate, numberOfFrames: n,
-        numberOfChannels: channels, timestamp: ts, data: buf,
+    let aEnc = null;
+    if (withAudio) {
+      aEnc = new AudioEncoder({
+        output: (chunk, meta) => muxer.addAudioChunk(chunk, meta),
+        error: (e) => { throw e; },
       });
-      ts += Math.round((n / sampleRate) * 1e6);
-      aEnc.encode(ad);
-      ad.close();
+      aEnc.configure({ codec: "mp4a.40.2", sampleRate, numberOfChannels: channels, bitrate: 128000 });
+
+      // Audio: PCM → AAC (trozos de 1024 muestras, f32 planar)
+      const FR = 1024;
+      const total = audioBuffer.length;
+      const chData = [];
+      for (let c = 0; c < channels; c++) chData.push(audioBuffer.getChannelData(c));
+      for (let off = 0, ts = 0; off < total; off += FR) {
+        const n = Math.min(FR, total - off);
+        const buf = new ArrayBuffer(n * channels * 4);
+        const f32 = new Float32Array(buf);
+        for (let c = 0; c < channels; c++) f32.set(chData[c].subarray(off, off + n), c * n);
+        const ad = new AudioData({
+          format: "f32-planar", sampleRate, numberOfFrames: n,
+          numberOfChannels: channels, timestamp: ts, data: buf,
+        });
+        ts += Math.round((n / sampleRate) * 1e6);
+        aEnc.encode(ad);
+        ad.close();
+      }
+      await aEnc.flush();
     }
-    await aEnc.flush();
 
     // Video: <video> → canvas con marca → H.264 (timestamps reales de presentación)
     const FRAME_US = Math.round(1e6 / 30);
@@ -344,7 +353,7 @@ async function processVideoMp4(item, settings) {
     });
     await vEnc.flush();
     try { vEnc.close(); } catch (e) {}
-    try { aEnc.close(); } catch (e) {}
+    if (aEnc) { try { aEnc.close(); } catch (e) {} }
     muxer.finalize();
     return new Blob([muxer.target.buffer], { type: "video/mp4" });
   } finally {
