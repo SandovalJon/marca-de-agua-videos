@@ -223,6 +223,138 @@ function closePreview() {
   els.lightbox.hidden = true;
 }
 
+// ---- Ruta MP4→MP4 con WebCodecs (mismo formato + audio original recodificado) ----
+const MP4_LIKE = /\.(mp4|m4v|mov)$/i;
+
+async function processVideoMp4(item, settings) {
+  const { Muxer, ArrayBufferTarget } = await import("./vendor/mp4-muxer.mjs");
+  if (typeof VideoEncoder === "undefined" || typeof AudioEncoder === "undefined" ||
+      typeof VideoFrame === "undefined" || typeof AudioData === "undefined") {
+    throw new Error("sin WebCodecs");
+  }
+  const { video, url } = await loadVideo(item.file);
+  try {
+    const scale = Math.min(1, MAX_W / video.videoWidth);
+    const w = Math.max(2, Math.floor(video.videoWidth * scale / 2) * 2);
+    const h = Math.max(2, Math.floor(video.videoHeight * scale / 2) * 2);
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d");
+
+    // Audio original → PCM (conserva el sonido sin importar su codec de entrada)
+    const AC0 = window.AudioContext || window.webkitAudioContext;
+    if (!AC0) throw new Error("sin Web Audio");
+    const ac = new AC0();
+    let audioBuffer = null;
+    try {
+      if (ac.state === "suspended" && typeof ac.resume === "function") await ac.resume();
+      audioBuffer = await ac.decodeAudioData(await item.file.arrayBuffer());
+    } finally {
+      try { if (ac.close) await ac.close(); } catch (e) {}
+    }
+    if (!audioBuffer) throw new Error("no se pudo leer el audio");
+    const sampleRate = audioBuffer.sampleRate;
+    const channels = Math.min(2, audioBuffer.numberOfChannels || 2);
+
+    const vSup = await VideoEncoder.isConfigSupported({
+      codec: "avc1.640028", width: w, height: h, bitrate: 8000000, framerate: 30,
+    }).catch(() => ({ supported: false }));
+    const aSup = await AudioEncoder.isConfigSupported({
+      codec: "mp4a.40.2", sampleRate, numberOfChannels: channels, bitrate: 128000,
+    }).catch(() => ({ supported: false }));
+    if (!vSup.supported || !aSup.supported) throw new Error("codificadores no soportados");
+
+    const muxer = new Muxer({
+      target: new ArrayBufferTarget(),
+      fastStart: "in-memory",
+      firstTimestampBehavior: "offset",
+      video: { codec: "avc", width: w, height: h },
+      audio: { codec: "aac", sampleRate, numberOfChannels: channels },
+    });
+    const vEnc = new VideoEncoder({
+      output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
+      error: (e) => { throw e; },
+    });
+    vEnc.configure({ codec: "avc1.640028", width: w, height: h, bitrate: 8000000, framerate: 30 });
+    const aEnc = new AudioEncoder({
+      output: (chunk, meta) => muxer.addAudioChunk(chunk, meta),
+      error: (e) => { throw e; },
+    });
+    aEnc.configure({ codec: "mp4a.40.2", sampleRate, numberOfChannels: channels, bitrate: 128000 });
+
+    // Audio: PCM → AAC (trozos de 1024 muestras, f32 planar)
+    const FR = 1024;
+    const total = audioBuffer.length;
+    const chData = [];
+    for (let c = 0; c < channels; c++) chData.push(audioBuffer.getChannelData(c));
+    for (let off = 0, ts = 0; off < total; off += FR) {
+      const n = Math.min(FR, total - off);
+      const buf = new ArrayBuffer(n * channels * 4);
+      const f32 = new Float32Array(buf);
+      for (let c = 0; c < channels; c++) f32.set(chData[c].subarray(off, off + n), c * n);
+      const ad = new AudioData({
+        format: "f32-planar", sampleRate, numberOfFrames: n,
+        numberOfChannels: channels, timestamp: ts, data: buf,
+      });
+      ts += Math.round((n / sampleRate) * 1e6);
+      aEnc.encode(ad);
+      ad.close();
+    }
+    await aEnc.flush();
+
+    // Video: <video> → canvas con marca → H.264 (timestamps reales de presentación)
+    const FRAME_US = Math.round(1e6 / 30);
+    video.muted = true;
+    // En el DOM (invisible): rVFC no siempre dispara en videos sueltos
+    try {
+      video.setAttribute("playsinline", "");
+      video.style.cssText = "position:fixed;left:0;top:0;width:2px;height:2px;opacity:0;pointer-events:none;";
+      document.body.appendChild(video);
+    } catch (e) {}
+    try { video.currentTime = 0; } catch (e) {}
+    await new Promise((resolve, reject) => {
+      let frames = 0, done = false;
+      const finish = (err) => { if (!done) { done = true; err ? reject(err) : resolve(); } };
+      const onFrame = (now, meta) => {
+        if (done) return;
+        try {
+          ctx.drawImage(video, 0, 0, w, h);
+          drawWatermark(ctx, w, h, settings);
+          const vf = new VideoFrame(canvas, {
+            timestamp: Math.round(meta.mediaTime * 1e6), duration: FRAME_US,
+          });
+          vEnc.encode(vf, { keyFrame: frames % 120 === 0 });
+          vf.close();
+          frames++;
+        } catch (e) { finish(e); return; }
+        if (!video.ended && !video.paused) {
+          try { video.requestVideoFrameCallback(onFrame); }
+          catch (e) { finish(new Error("sin requestVideoFrameCallback")); }
+        }
+      };
+      video.onended = () => finish();
+      video.onerror = () => finish(new Error("error al reproducir para codificar"));
+      const guard = Math.min(4 * 3600, (isFinite(video.duration) ? video.duration : 60) + 20) * 1000;
+      setTimeout(() => finish(), guard);
+      video.play().then(() => {
+        try { video.requestVideoFrameCallback(onFrame); }
+        catch (e) { finish(new Error("sin requestVideoFrameCallback")); }
+      }).catch(finish);
+    });
+    await vEnc.flush();
+    try { vEnc.close(); } catch (e) {}
+    try { aEnc.close(); } catch (e) {}
+    muxer.finalize();
+    return new Blob([muxer.target.buffer], { type: "video/mp4" });
+  } finally {
+    try { video.pause(); } catch (e) {}
+    try { video.remove(); } catch (e) {}
+    video.src = "";
+    URL.revokeObjectURL(url);
+  }
+}
+
 // ---- Procesado por lote: re-graba cada video con la marca ----
 function pickMime() {
   if (typeof MediaRecorder === "undefined") return "";
@@ -371,11 +503,25 @@ els.btnDownload.addEventListener("click", async () => {
     for (let i = 0; i < state.items.length; i++) {
       const item = state.items[i];
       els.btnDownload.textContent = `Procesando ${i + 1}/${state.items.length}… (${item.file.name})`;
-      setStatus(`Marcando ${i + 1}/${state.items.length}: ${item.file.name} (tarda lo que dura el video)…`);
       const dot = (item.file.name || "video").lastIndexOf(".");
       const base = (dot > -1 ? item.file.name.slice(0, dot) : item.file.name).replace(/[\\/:*?"<>|]/g, "_");
-      const blob = await processVideo(item, getSettings(), mime);
-      zip.file(uniqueName(`${base}.webm`), blob);
+      // MP4/MOV → mismo formato MP4 con audio; resto o fallo → WebM
+      const mp4Like = MP4_LIKE.test(item.file.name || "") || item.file.type === "video/mp4";
+      let blob = null, ext = "webm";
+      if (mp4Like) {
+        try {
+          setStatus(`Marcando ${i + 1}/${state.items.length}: ${item.file.name} (MP4 con audio)…`);
+          blob = await processVideoMp4(item, getSettings());
+          ext = "mp4";
+        } catch (e) {
+          setStatus(`MP4 no disponible (${e.message || e}), usando WebM para: ${item.file.name}`);
+        }
+      }
+      if (!blob) {
+        setStatus(`Marcando ${i + 1}/${state.items.length}: ${item.file.name} (WebM, tarda lo que dura el video)…`);
+        blob = await processVideo(item, getSettings(), mime);
+      }
+      zip.file(uniqueName(`${base}.${ext}`), blob);
     }
 
     els.btnDownload.textContent = "Comprimiendo…";
