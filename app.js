@@ -312,45 +312,47 @@ async function processVideoMp4(item, settings) {
       await aEnc.flush();
     }
 
-    // Video: <video> → canvas con marca → H.264 (timestamps reales de presentación)
+    // Video: <video> → canvas con marca → H.264.
+    // Se captura por currentTime real (no depende de composición como rVFC).
     const FRAME_US = Math.round(1e6 / 30);
     video.muted = true;
-    // En el DOM (invisible): rVFC no siempre dispara en videos sueltos
-    try {
-      video.setAttribute("playsinline", "");
-      video.style.cssText = "position:fixed;left:0;top:0;width:2px;height:2px;opacity:0;pointer-events:none;";
-      document.body.appendChild(video);
-    } catch (e) {}
     try { video.currentTime = 0; } catch (e) {}
-    await new Promise((resolve, reject) => {
-      let frames = 0, done = false;
-      const finish = (err) => { if (!done) { done = true; err ? reject(err) : resolve(); } };
-      const onFrame = (now, meta) => {
+    const framesDone = await new Promise((resolve, reject) => {
+      let lastCT = -1, frames = 0, done = false;
+      const finish = (err) => {
+        if (!done) { done = true; err ? reject(err) : resolve(frames); }
+      };
+      const pump = () => {
         if (done) return;
         try {
-          ctx.drawImage(video, 0, 0, w, h);
-          drawWatermark(ctx, w, h, settings);
-          const vf = new VideoFrame(canvas, {
-            timestamp: Math.round(meta.mediaTime * 1e6), duration: FRAME_US,
-          });
-          vEnc.encode(vf, { keyFrame: frames % 120 === 0 });
-          vf.close();
-          frames++;
+          if (video.ended ||
+              (isFinite(video.duration) && video.duration > 0 &&
+               video.currentTime >= video.duration - 0.04)) {
+            finish();
+            return;
+          }
+          const ct = video.currentTime;
+          if (ct > lastCT + 0.0001) {
+            lastCT = ct;
+            ctx.drawImage(video, 0, 0, w, h);
+            drawWatermark(ctx, w, h, settings);
+            const vf = new VideoFrame(canvas, {
+              timestamp: Math.round(ct * 1e6), duration: FRAME_US,
+            });
+            vEnc.encode(vf, { keyFrame: frames % 120 === 0 });
+            vf.close();
+            frames++;
+          }
         } catch (e) { finish(e); return; }
-        if (!video.ended && !video.paused) {
-          try { video.requestVideoFrameCallback(onFrame); }
-          catch (e) { finish(new Error("sin requestVideoFrameCallback")); }
-        }
+        requestAnimationFrame(pump);
       };
       video.onended = () => finish();
       video.onerror = () => finish(new Error("error al reproducir para codificar"));
       const guard = Math.min(4 * 3600, (isFinite(video.duration) ? video.duration : 60) + 20) * 1000;
       setTimeout(() => finish(), guard);
-      video.play().then(() => {
-        try { video.requestVideoFrameCallback(onFrame); }
-        catch (e) { finish(new Error("sin requestVideoFrameCallback")); }
-      }).catch(finish);
+      video.play().then(() => requestAnimationFrame(pump)).catch(finish);
     });
+    if (!framesDone) throw new Error("no se capturó ningún frame");
     await vEnc.flush();
     try { vEnc.close(); } catch (e) {}
     if (aEnc) { try { aEnc.close(); } catch (e) {} }
