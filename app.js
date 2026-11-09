@@ -322,6 +322,7 @@ async function processVideoMp4(item, settings) {
       const finish = (err) => {
         if (!done) { done = true; err ? reject(err) : resolve(frames); }
       };
+      // Con temporizador (no rAF): sigue avanzando aunque la pestaña esté en segundo plano
       const pump = () => {
         if (done) return;
         try {
@@ -344,13 +345,13 @@ async function processVideoMp4(item, settings) {
             frames++;
           }
         } catch (e) { finish(e); return; }
-        requestAnimationFrame(pump);
+        setTimeout(pump, 10);
       };
       video.onended = () => finish();
       video.onerror = () => finish(new Error("error al reproducir para codificar"));
       const guard = Math.min(4 * 3600, (isFinite(video.duration) ? video.duration : 60) + 20) * 1000;
       setTimeout(() => finish(), guard);
-      video.play().then(() => requestAnimationFrame(pump)).catch(finish);
+      video.play().then(() => setTimeout(pump, 0)).catch(finish);
     });
     if (!framesDone) throw new Error("no se capturó ningún frame");
     await vEnc.flush();
@@ -423,7 +424,7 @@ async function processVideo(item, settings, mime) {
         if (finished || video.ended) return;
         try { ctx.drawImage(video, 0, 0, w, h); } catch (e) {}
         drawWatermark(ctx, w, h, settings);
-        requestAnimationFrame(pump);
+        setTimeout(pump, 10);
       };
       pump();
     });
