@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Marca de Agua · Texto en tus videos (opacidad 50%)</title>
+<meta name="description" content="Añade una marca de agua de texto a varios videos a la vez: abajo a la derecha, 50% de opacidad. Todo ocurre en tu navegador, nada se sube a Internet.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💧</text></svg>">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <h1>Marca de <span class="grad">Agua</span> en videos</h1>
+    <p>Texto en la <strong>esquina inferior derecha</strong> con <strong>50% de opacidad</strong>. Por lote, en tu navegador, sin subir nada a Internet.</p>
+  </div>
+</header>
+
+<main class="wrap layout">
+
+  <!-- Ajustes -->
+  <aside class="panel settings">
+    <h2>1 · Tus videos</h2>
+    <label id="drop-zone" for="file-input">
+      <div class="dz-icon">🎬</div>
+      <div class="dz-title">Arrastra tus videos aquí</div>
+      <div class="dz-sub">o haz clic para seleccionarlos (varios a la vez)</div>
+    </label>
+    <input type="file" id="file-input" accept="video/*" multiple hidden>
+
+    <h2>2 · Marca de agua</h2>
+    <label for="wm-text">Texto</label>
+    <input type="text" id="wm-text" value="© Mi nombre" maxlength="80" placeholder="© Mi nombre · https://mi-web.com">
+
+    <label for="wm-size">Tamaño <span class="value" id="wm-size-value">Medio</span></label>
+    <input type="range" id="wm-size" min="1" max="10" step="1" value="4">
+    <div class="scale-labels"><span>Pequeño</span><span>Grande</span></div>
+
+    <label for="wm-color">Color</label>
+    <div class="color-row">
+      <input type="color" id="wm-color" value="#ffffff" aria-label="Color del texto">
+      <div class="color-presets">
+        <button class="preset" data-color="#ffffff" style="--c:#ffffff" aria-label="Blanco"></button>
+        <button class="preset" data-color="#000000" style="--c:#000000" aria-label="Negro"></button>
+        <button class="preset" data-color="#ffd166" style="--c:#ffd166" aria-label="Amarillo"></button>
+        <button class="preset" data-color="#6c8cff" style="--c:#6c8cff" aria-label="Azul"></button>
+        <button class="preset" data-color="#ff6b6b" style="--c:#ff6b6b" aria-label="Rojo"></button>
+      </div>
+      <code id="wm-color-hex">#ffffff</code>
+    </div>
+
+    <p class="note">Opacidad: 50% fijo · Posición: abajo a la derecha · Salida: WebM · Máx. 1920px de ancho · El audio se conserva · El proceso tarda lo que dura cada video</p>
+
+    <h2>3 · Descargar</h2>
+    <label for="zip-name">Nombre del ZIP</label>
+    <input type="text" id="zip-name" value="videos-con-marca-de-agua.zip" maxlength="80">
+    <div class="summary"><span id="count">0</span> videos listos</div>
+    <div class="actions">
+      <button id="btn-download" class="btn primary block" disabled>Descargar ZIP</button>
+      <button id="btn-clear" class="btn ghost block" disabled>Vaciar todo</button>
+    </div>
+    <p id="status" class="status" role="status"></p>
+  </aside>
+
+  <!-- Galería -->
+  <section class="panel gallery-panel">
+    <div class="gallery-head">
+      <h2>Vista previa</h2>
+      <span class="muted">Clic en un video para ver la marca en movimiento</span>
+    </div>
+    <div id="empty-state" class="empty">
+      <div class="empty-icon">🎞️</div>
+      <p>Todavía no has añadido videos.</p>
+    </div>
+    <div id="grid" class="grid"></div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap"><p>Procesamiento 100% local en tu navegador · Ningún video se envía a servidores · Marca de Agua en videos</p></div>
+</footer>
+
+<!-- Lightbox -->
+<div id="lightbox" class="lightbox" hidden role="dialog" aria-modal="true" aria-label="Vista previa con marca de agua">
+  <button id="lightbox-close" class="lightbox-close" aria-label="Cerrar">✕</button>
+  <canvas id="lightbox-canvas"></canvas>
+  <div id="lightbox-name" class="lightbox-name"></div>
+</div>
+
+<script src="vendor/jszip.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
